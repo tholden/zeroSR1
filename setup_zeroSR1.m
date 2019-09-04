@@ -2,7 +2,11 @@ function setup_zeroSR1
 % SETUP_ZEROSR1 Adds the zeroSR1 toolbox to the path
 
 baseDirectory = fileparts(mfilename('fullpath'));
-addpath(genpath(baseDirectory));
+addpath(baseDirectory);
+addpath( [ baseDirectory '/algorithms' ] );
+addpath( [ baseDirectory '/proxes' ] );
+addpath( [ baseDirectory '/smoothFunctions' ] );
+addpath( [ baseDirectory '/utilities' ] );
 
 % and make a variable in the main workspace
 % assignin('base','ZEROSR1ROOT', baseDirectory );

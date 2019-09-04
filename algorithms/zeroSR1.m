@@ -1,4 +1,4 @@
-function [xk,nit, errStruct, defaultOpts, stepsizes] = zeroSR1(fcn,grad,h,prox,opts)
+function [xk,nit, errStruct, defaultOpts, stepsizes] = zeroSR1(fcn,h,prox,opts) %#codegen
 % ZEROSR1 Solves smooth + nonsmooth/constrained optimization problems
 % [xk,nit, errStruct, outOpts] = zeroSR1(f,grad_f,h,prox_h,opts)
 %
@@ -95,18 +95,22 @@ else
     RECORD_OPTS     = false;
 end
 
-if nargin < 3 || isempty(h)
-    if nargin >= 4 && ~isempty(prox)
-        warning('zeroSR1:h_not_provided','Found prox_h but not h itself. Setting h=0, prox=I');
+if nargin < 2 || isempty(h)
+    if nargin >= 3 && ~isempty(prox)
+        warningCoder('zeroSR1:h_not_provided','Found prox_h but not h itself. Setting h=0, prox=I');
         prox = @(x,varargin) x;
     end
     h = @(x) 0;
 end
-if nargin < 4 || isempty(prox), prox = @(x,varargin) x; end
-if nargin < 5, opts = []; end 
+if nargin < 3 || isempty(prox), prox = @(x,varargin) x; end
+if nargin < 4, opts = struct( 'fid', 1, 'tol', 1e-06, 'grad_tol', 1e-06, 'nmax', int32( 1000 ), 'errFcn', [], 'verbose', false, 'maxStag', 10, 'x0', [], 'N', 0, 'damped', false, 'SR1', true, 'BFGS', false, 'BB', true, 'L', -1, 'BB_type', 2, 'SR1_diagWeight', 0.8 ); end 
 
-setOptsSubFcn(); % zero out any persistent variables
-setOpts     = @(varargin) setOptsSubFcn( RECORD_OPTS, opts, varargin{:} );
+if coder.target( 'MATLAB' )
+    setOptsSubFcn(); % zero out any persistent variables
+    setOpts     = @(varargin) setOptsSubFcn( RECORD_OPTS, opts, varargin{:} );
+else
+    setOpts = @( FieldName, varargin ) opts.( FieldName );
+end
 % Usage: setOpts( field, default, mn, mx, emptyOK (default:false) );
 
 fid     = setOpts('fid', 1 );      % print output to the screen or a file
@@ -127,14 +131,21 @@ damped  = setOpts('damped',false); % 1=no damping, .01 = very tiny step
 % -- Options that concern the stepsize --
 SR1             = setOpts( 'SR1', true );
 BFGS            = setOpts( 'BFGS', false );
+if ~coder.target( 'MATLAB' )
+    BFGS = false;
+    SR1 = true;
+end
 if SR1 && BFGS
     error('zeroSR1:conflictingArgs','Cannot set SR1 and BFGS to both be true');
 end
 BB              = setOpts( 'BB', SR1 || BFGS );
-if isfield(opts,'L') && isempty(opts.L) && ~BB
-    warning('zeroSR1:noGoodStepsize','Without Lipschitz constant nor BB stepsize nor line search, bad things will happen');
+if isfield(opts,'L') && opts.L<0
+    HessianMode = true;
+    L               = setOpts( 'L', -1 );   % Lipschitz constant, e.g. norm(A)^2
+else
+    HessianMode = false;
+    L               = setOpts( 'L', 1, 0 );   % Lipschitz constant, e.g. norm(A)^2
 end
-L               = setOpts( 'L', 1, 0 );   % Lipschitz constant, e.g. norm(A)^2
 
 SIGMA           = +1; % used for SR1 feature
 % Default BB stepsize. type "1" is longer and usually faster
@@ -143,7 +154,7 @@ if (SR1||BFGS) && BB_type == 1
 %     warning('zeroSR1:badBB_parameter','With zero-memory SR1, BB_type must be set to 2. Forcing BB_type = 2 and continuing');
 %     BB_type     = 2;
 
-    warning('zeroSR1:experimental','With zero-memory SR1, BB_type=1 is an untested feature');
+    warningCoder('zeroSR1:experimental','With zero-memory SR1, BB_type=1 is an untested feature');
     SIGMA       = -1;
 end
 if SR1
@@ -157,24 +168,25 @@ if SR1 && BB_type == 2 && SR1_diagWeight > 1
 end
 
 % ------------ Scan options for capitalization issues, etc. -------
-[defaultOpts,opts] = setOpts();
-if nargin == 0 
-    disp('Default options:');
-    disp( defaultOpts );
-end
-if ~isempty(fieldnames(opts))
-    disp('Error detected! I didn''t recognize these options:');
-    disp( opts );
-    error('Bad options');
+if coder.target( 'MATLAB' )
+    [defaultOpts,opts] = setOpts();
+    if nargin == 0 
+        disp('Default options:');
+        disp( defaultOpts );
+        xk = defaultOpts;
+    end
+    if ~isempty(fieldnames(opts)) && nargin > 0
+        disp('Error detected! I didn''t recognize these options:');
+        disp( opts );
+        error('Bad options');
+    end
 end
 if nargin == 0 , return; end
 
 % ------------ Initializations and such ---------------------------
 xk_old  = xk;
 % gradient  = zeros(N,1);
-getGradient     = @(varargin) getGradientFcn(fcn,grad, varargin{:});
 fxold   = Inf;
-t       = 1/L; % initial stepsize
 stepsizes = zeros(nmax,1 + (SR1||BFGS)); % records some statisics
 if ~isempty(errFcn)
     if ~isa(errFcn,'function_handle')
@@ -187,15 +199,24 @@ end
 skipBB = false;
 stag   = 0;
 
-
-gradient        = getGradient(xk);
+if HessianMode
+    [ ~, gradient, Hessian ] = fcn( xk );
+    L = norm( Hessian );
+else
+    [ ~, gradient ]          = fcn( xk );
+end
+t       = 1/L; % initial stepsize
+gradient = gradient(:);
 gradient_old    = gradient;
-f_xk            = [];
+UpdatedHessian = false;
 
 % -----------------------------------------------------------------
 % ------------ Begin algorithm ------------------------------------
 % -----------------------------------------------------------------
-for nit = 1:nmax
+
+ReachedEnd = false;
+
+for nit = int32(1):int32(nmax)
 
     % Do this at end now, so we can get fcn value for free
 %     gradient_old    = gradient;
@@ -206,9 +227,14 @@ for nit = 1:nmax
     %   seen as a quasi-Newton method)
     sk      = xk        - xk_old;
     yk      = gradient  - gradient_old;   % Following notation in Nocedal/Wright
+    UpdateHessian = false;
     if nit > 1 && norm(yk) < 1e-13
-        warning('zeroSR1:zeroChangeInGradient','gradient isn''t changing , try changing opts.L');
-        yk = [];
+        if HessianMode
+            UpdateHessian = true;
+        else
+            warningCoder('zeroSR1:zeroChangeInGradient','gradient isn''t changing , try changing opts.L');
+        end
+        yk = NaN( size( yk ) );
         skipBB = true;
     end
     
@@ -233,11 +259,11 @@ for nit = 1:nmax
             %   equation, and there is no need for a rank-1 correction.
             t    = SR1_diagWeight*t; % SR1_diagWeights is a scalar less than 1 like 0.6
         end
-        H0      = @(x) t*x;
+        H0 = t;
         diagH   = t*ones(N,1);
     else 
         t       = 1/L;
-        H0      = @(x) t*x;         % diagonal portion of inverse Hessian
+        H0 = t;         % diagonal portion of inverse Hessian
         diagH   = t*ones(N,1);
     end
     skipBB  = false;
@@ -248,45 +274,51 @@ for nit = 1:nmax
     % ---------------------------------------------------------------------
     % -- Quasi-Newton -- Requries: H0, and builds H
     % ---------------------------------------------------------------------
-    if SR1 && nit > 1 && ~isempty(yk) 
+    if SR1 && nit > 1 && all(isfinite(yk))
         gs = yk'*sk;
 %         gHg = yk'*(diagH.*yk); % not needed any more
         if gs < 0
             myDisp('Serious curvature condition problem!');
             stag = Inf;  
         end
-        H0  = @(x) diagH.*x;
-        vk  = sk - H0(yk);
+        H0 = diagH;
+        vk  = sk - bsxfun(@times,H0,yk);
         vkyk    = vk'*yk;
         SIGMA_LOCAL = sign( vkyk );
         %if SIGMA*vkyk  <= 0
         if SIGMA_LOCAL*vkyk  <= 0
             myDisp('Warning: violated curvature conditions');
             % This should only happen if we took an exact B-B step, which we don't.
-            vk  = [];
-            H   = H0;
+            vk  = 0;
+            HA = H0;
+            HB = 0;
+            HC = 0;
             stepsizes(nit,2)    = 0;
         else
-            vk  = vk/sqrt( SIGMA_LOCAL*vkyk );
+            vk  = vk./sqrt( SIGMA_LOCAL*vkyk );
+            vk = vk(:);
             % And at last, our rank-1 approximation of the inverse Hessian.
-            H   = @(x) H0(x) + SIGMA_LOCAL*(vk*(vk'*x));
+            % H   = @(x) H0.*x + SIGMA_LOCAL*(vk*(vk'*x));
+            HA = H0;
+            HB = SIGMA_LOCAL * vk;
+            HC = vk;
             % The (inverse) secant equation is B*sk = yk(=y), or Hy=s
             % N.B. We can make a rank-1 approx. of the Hessian too; see the full
             % version of the code.
             
             stepsizes(nit,2)    = vk'*vk;
         end
-    elseif BFGS && nit > 1 && ~isempty(yk) 
+    elseif BFGS && nit > 1 && all(isfinite(yk))
         gs = yk'*sk;
         rho= 1/gs;
         if gs < 0
             myDisp('Serious curvature condition problem!');
             stag = Inf;  
         end
-        H0  = @(x) diagH.*x;
+        H0 = diagH;
         
         tauBB   = sk'*yk/( norm(yk)^2);
-        uk      = sk/2 + H0(sk)/(2*tauBB) - H0(yk);
+        uk      = sk/2 + bsxfun(@times,H0,sk)/(2*tauBB) - bsxfun(@times,H0,yk);
         % if H0 is tauBB*I (e.g., gamma=1), then vk = sk - H0(yk).
         
         
@@ -295,21 +327,26 @@ for nit = 1:nmax
         vk      = [sk-uk, sk+uk]*sqrt(rho/2); % rank 2!
         SIGMA_LOCAL = [-1,1];
         
-        H   = @(x) H0(x) + vk*( diag(SIGMA_LOCAL)*(vk'*x) );
+        % H   = @(x) H0.*x + vk*( diag(SIGMA_LOCAL)*(vk'*x) );
+        HA = H0;
+        HB = vk * diag(SIGMA_LOCAL);
+        HC = vk;
         
         %fprintf('DEBUG: %.2e\n', norm( H(yk) - sk )  );
         
     else
         SIGMA_LOCAL     = SIGMA;
-        H = H0;
-        vk= [];
+        HA = H0;
+        HB = 0;
+        HC = 0;
+        vk= 0;
     end
     
     
     % ---------------------------------------------------------------------
     % -- Make the proximal update -----------------------------------------
     % ---------------------------------------------------------------------
-    p       = H(-gradient);  % Scaled descent direction. H includes the stepsize
+    p       = - bsxfun( @plus, bsxfun( @times, HA, gradient ), bsxfun( @times, HB, sum( bsxfun( @times, HC, gradient ) ) ) ); % H(-gradient);  % Scaled descent direction. H includes the stepsize
     xk_old  = xk;
     if ~isequal(SIGMA_LOCAL,1)
         if damped
@@ -339,7 +376,14 @@ for nit = 1:nmax
     % -- record function values --
     % ---------------------------------------------------------------------
     gradient_old    = gradient;
-    [gradient,f_xk]  = getGradient(xk); % can be cheaper if user provided a nice fcn
+    if UpdateHessian && (~UpdatedHessian)
+        [f_xk,gradient,Hessian]  = fcn(xk); % can be cheaper if user provided a nice fcn
+        L = norm( Hessian );
+        UpdatedHessian = true;
+    else
+        [f_xk,gradient]  = fcn(xk); % can be cheaper if user provided a nice fcn
+    end
+    gradient = gradient(:);
     fx  = f_xk + h(xk);
 %     fx  = fcn(xk) + h(xk);
     df  = abs(fx - fxold)/abs(fxold);
@@ -349,7 +393,7 @@ for nit = 1:nmax
         stag = stag + 1;
     end
     
-    if VERBOSE && (~rem(nit,VERBOSE) || stag>maxStag )
+    if VERBOSE && (~rem(double(nit),double(VERBOSE)) || stag>maxStag )
         fprintf(fid,'Iter: %5d, f: % 7.3e, df: %.2e, ||grad||: %.2e, step %.2e\n',...
             nit,fx,df, norm_grad, t);
     end
@@ -370,38 +414,24 @@ for nit = 1:nmax
         break;
     end
     
+    if nit == nmax
+        ReachedEnd = true;
+    end
+    
 end
 
-if nit == nmax && VERBOSE, myDisp('Maxed out iteration limit'); end
-if nit < nmax
-    errStruct = errStruct( 1:nit, : );
-    stepsizes = stepsizes( 1:nit, : );
-end
+if ReachedEnd && VERBOSE, myDisp('Maxed out iteration limit'); end
+% if ~ReachedEnd
+%     errStruct = errStruct( 1:nit, : );
+%     stepsizes = stepsizes( 1:nit, : );
+% end
 
 end  % end of main routine
 
-function [gradientValue,fcnValue] = getGradientFcn( fcn, gradient, x, str )
-% The user can either specify fcn and gradient separately,
-%   or they can specify them both in a single function (also called fcn)
-% This latter option is triggered whenever gradient=[]
-if nargin < 4, str = []; end
-if isempty(gradient)
-    [fcnValue,gradientValue]    = fcn(x);
-else
-    gradientValue               = gradient(x);
-    if nargout > 1 
-        if strcmpi(str,'fcn_optional')
-            fcnValue = [];
-        else
-            fcnValue  = fcn(x);
-        end
-    end
-end
-end
-
-function varargout = setOptsSubFcn(RECORD_OPTS, opts, field, default, mn, mx, emptyOK )
+function varargout = setOptsSubFcn(RECORD_OPTS, opts, field, default, mn, mx, emptyOK ) %#codegen
     persistent defaultOpts
     persistent updatedOpts
+    
     if nargin <= 2
         % non-standard usage
         varargout{1} = defaultOpts;
@@ -423,9 +453,17 @@ function varargout = setOptsSubFcn(RECORD_OPTS, opts, field, default, mn, mx, em
     if nargin >= 5 && ~isempty(mn) && any(out < mn), error('Value is too small'); end
     if nargin >= 6 && ~isempty(mx) && any(out > mx), error('Value is too large'); end
     if isfield( updatedOpts, field )
-        updatedOpts    = rmfield( updatedOpts, field ); % so we can do a check later
+        if coder.target( 'MATLAB' )
+            updatedOpts    = rmfield( updatedOpts, field ); % so we can do a check later
+        end
     end
     if RECORD_OPTS
         defaultOpts.(field) = out;
+    end
+end
+
+function warningCoder( varargin )
+    if coder.target( 'MATLAB' )
+        warning( varargin{ : } );
     end
 end

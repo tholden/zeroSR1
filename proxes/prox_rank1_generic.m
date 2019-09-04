@@ -60,7 +60,7 @@ function [x,a,cnt] = prox_rank1_generic( prox, prox_brk_pts, x0, D, u, lambda, l
 
 PRINT = false; % set to "true" for debugging purposes
 if PRINT
-    dispp = @disp;
+    dispp = @disp; %#ok<UNRCH>
     printf = @fprintf;
 else
     dispp = @(varargin) 1;
@@ -76,8 +76,10 @@ if nargin < 8 || isempty(plusminus), plusminus = 1; end
 assert( plusminus==-1 | plusminus==+1 )
 if nargin < 9 || isempty(INVERT), INVERT = true; end
 
-if size(D,2) > 1, d = diag(D); else d = D; end % extract diagonal part
+if size(D,2) > 1, d = diag(D); else; d = D; end % extract diagonal part
 if any( d < 0 ), error('D must only have strictly positive entries'); end
+
+u = u(:);
 
 if all( u==0 )
     % Just a diagonal scaling, so this code is overkill,
@@ -125,7 +127,7 @@ if INVERT
     
     % The code also requires uu./dd and 1./dd, so define these here
 %     ud      = uu./dd; 
-    ud      = u/sqrt(1+u'*(u./d)); % more accurate? % 6.01e-3 error
+    ud      = u/sqrt(1+sum(bsxfun(@times,u,bsxfun(@rdivide,u,d)))); % more accurate? % 6.01e-3 error
     dInv    = 1./dd;
 else
     % Here, V    = diag(d) + sigma*u*u'
@@ -166,7 +168,7 @@ if size(t,1) < n
         error('"prox_brk_pts" should return a ROW VECTOR of break points');
     end
     % otherwise, assume each component identical, so scale
-    t = repmat(t,n,1);
+    % t = repmat(t,n,1);
 end
 if ~isempty(linTerm) && norm(linTerm)>=0
     if isempty(lambda)
@@ -213,7 +215,9 @@ brk_pts = brk_pts(~isinf(brk_pts)); % in case lwr/upr=Inf for box
 lwrBnd       = 0;
 uprBnd       = length(brk_pts) + 1;
 iMax         = ceil( log2(length(brk_pts)) ) + 1;
+cnt = 0;
 for i = 1:iMax
+    cnt = cnt + 1;
     if uprBnd - lwrBnd <= 1
         dispp('Bounds are too close; breaking');
         break;
@@ -241,23 +245,25 @@ for i = 1:iMax
         % Don't rely on redefinition of printf,
         % since then we would still calculate find(~x)
         % which is slow
-        printf('i=%2d, a = %6.3f, p = %8.3f, zeros ', i, a, p );
+        printf('i=%2d, a = %6.3f, p = %8.3f, zeros ', i, a, p ); %#ok<UNRCH>
         if n < 100, printf('%d ', find(~x) ); end
         % printf('; nonzeros ');printf('%d ', find(x) );
         printf('\n');
     end
 end
-cnt     = i; % number of iterations we took
 
 % Now, determine linear part, which we infer from two points.
 % If lwr/upr bounds are infinite, we take special care
 % e.g., we make a new "a" slightly lower/bigger, and use this
 % to extract linear part.
 if lwrBnd == 0
+%     if uprBnd > numel( brk_pts )
+%         keyboard
+%     end
     a2 = brk_pts( uprBnd );
     a1 = a2 - 10; % arbitrary
     aBounds = [-Inf,a2];
-elseif uprBnd == length(brk_pts) + 1;
+elseif uprBnd == length(brk_pts) + 1
     a1 = brk_pts( lwrBnd );
     a2 = a1 + 10; % arbitrary
     aBounds = [a1,Inf];
@@ -287,4 +293,4 @@ if ~isempty(lambda)
     x = x./lambda;
 end
 
-printf('Took %d of %d iterations, lwrBnd is %d/%d \n', i, iMax, lwrBnd,length( brk_pts ) );
+printf('Took %d of %d iterations, lwrBnd is %d/%d \n', cnt, iMax, lwrBnd,length( brk_pts ) );
